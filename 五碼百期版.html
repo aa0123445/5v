@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <title>急速飛艇預測系統 V7 - 修改後版</title>
+  <style>
+    body { font-family: "Microsoft JhengHei", sans-serif; padding: 20px; background: #f5f5f5; }
+    h1, h2 { margin-top: 20px; }
+    textarea { width: 100%; height: 300px; font-size: 16px; }
+    button { padding: 10px 20px; margin-top: 10px; font-size: 16px; }
+    .output { margin-top: 20px; padding: 10px; background: #fff; border: 1px solid #ccc; }
+  </style>
+</head>
+<body>
+  <h1>急速飛艇預測系統 V7 - 修改後版</h1>
+  <h2>請輸入最新100期開獎號碼（每期1顆，每行一個號碼）</h2>
+  <textarea id="inputArea" placeholder="例如:
+3
+7
+1
+9
+6
+..."></textarea>
+  <button onclick="analyze()">執行預測</button>
+  <div id="result" class="output"></div>
+  <script>
+    // 候選號碼池：1～10
+    const fullPool = Array.from({ length: 10 }, (_, i) => i + 1);
+
+    // 權重設定
+    const weight = { 
+      w1: 1.5,   // 邏輯1
+      w2: 1.0,   // 邏輯2
+      w3: 0.8,   // 邏輯3
+      w5: 1.2,   // 邏輯5
+      w6: 1.0,   // 邏輯6
+      w7a: 1.0,  // 邏輯7a
+      w7b: 1.0,  // 邏輯7b
+      w8: 0.8,   // 邏輯8
+      w9: 1.0,   // 邏輯9
+      w10: 1.0,  // 邏輯10
+      w11: 1.0   // 邏輯11（冷號）
+    };
+
+    // 解析使用者輸入（轉成數字陣列）
+    function parseInput() {
+      return document.getElementById("inputArea").value
+               .trim()
+               .split("\n")
+               .map(n => parseInt(n))
+               .filter(n => !isNaN(n));
+    }
+
+    // 求平均值（避免除以0）
+    function avg(arr) {
+      const sum = arr.reduce((a, b) => a + Math.abs(b), 0);
+      return sum / arr.length || 1;
+    }
+
+    // ── 邏輯1：延續號碼（從最近50期資料中取最新6期，僅當其由5顆號碼組成且重複號碼非連續時計分）
+    function logic1(h, p) {
+      const last50 = h.slice(-50);
+      const last6 = last50.slice(-6);
+      const uniqueNums = [...new Set(last6)];
+      const s = {};
+      // 預設分數都為 0
+      p.forEach(n => s[n] = 0);
+
+      // 如果 6 期內沒有剛好 5 個獨立號碼（表示有一個號碼重複），就不計分
+      if (uniqueNums.length !== 5) {
+        return s;
+      }
+
+      // 找出那個重複號碼
+      let duplicate;
+      for (const num of uniqueNums) {
+        if (last6.filter(x => x === num).length === 2) {
+          duplicate = num;
+          break;
+        }
+      }
+      // 檢查該重複號碼是否連續出現
+      const indices = [];
+      for (let i = 0; i < last6.length; i++) {
+        if (last6[i] === duplicate) indices.push(i);
+      }
+      // 若重複號碼連續出現，則不計分
+      if (indices[1] - indices[0] === 1) {
+        return s;
+      }
+
+      // 否則開始計算匹配次數
+      const sorted6 = [...last6].sort((a, b) => a - b).join(',');
+      let count = 0;
+      for (let i = 0; i <= last50.length - 6; i++) {
+        const seg = [...last50.slice(i, i + 6)].sort((a, b) => a - b).join(',');
+        if (seg === sorted6) count++;
+      }
+      // 分數給予：如果號碼出現在這 6 期內 -> 0.3 * count；否則 1 * count
+      p.forEach(n => {
+        s[n] = last6.includes(n) ? 0.3 * count : 1 * count;
+      });
+      return s;
+    }
+
+    // ── 邏輯2：近5期判斷大小及奇偶
+    function logic2(h, p) {
+      const l5 = h.slice(-5);
+      const bigCount = l5.filter(n => n >= 6).length;
+      const oddCount = l5.filter(n => n % 2 === 1).length;
+      const s = {};
+      p.forEach(n => {
+        let score = 0;
+        // 大號判斷
+        if (bigCount >= 3) {
+          score += (n >= 6 ? 0.1 : 0);
+        } else {
+          score += (n <= 5 ? 0.1 : 0);
+        }
+        // 奇數判斷
+        if (oddCount >= 3) {
+          score += (n % 2 === 1 ? 0.1 : 0);
+        } else {
+          score += (n % 2 === 0 ? 0.1 : 0);
+        }
+        s[n] = score;
+      });
+      return s;
+    }
+
+    // ── 邏輯3：近10期判斷大小及奇偶（門檻以5為準）
+    function logic3(h, p) {
+      const l10 = h.slice(-10);
+      const b = l10.filter(n => n >= 6).length;
+      const o = l10.filter(n => n % 2 === 1).length;
+      const s = {};
+      p.forEach(n => {
+        s[n] = ((b > 5 && n >= 6) || (b <= 5 && n <= 5) ? 0.05 : 0) +
+               ((o > 5 && n % 2 === 1) || (o <= 5 && n % 2 === 0) ? 0.05 : 0);
+      });
+      return s;
+    }
+
+    // ── 邏輯5：近7期趨勢判斷（根據大、小、奇、偶多寡，給特定號碼加0.2分）
+    function logic5(h, p) {
+      const l7 = h.slice(-7);
+      const bigCount = l7.filter(n => n >= 6).length;
+      const smallCount = l7.filter(n => n <= 5).length;
+      const oddCount = l7.filter(n => n % 2 === 1).length;
+      const evenCount = l7.filter(n => n % 2 === 0).length;
+
+      const sizeTrend = (bigCount > smallCount) ? "big" : "small";
+      const parityTrend = (oddCount > evenCount) ? "odd" : "even";
+
+      const s = {};
+      p.forEach(n => s[n] = 0);
+
+      if (sizeTrend === "big" && parityTrend === "odd") {
+        [7, 9].forEach(num => { s[num] += 0.2; });
+      } else if (sizeTrend === "big" && parityTrend === "even") {
+        [6, 8, 10].forEach(num => { s[num] += 0.2; });
+      } else if (sizeTrend === "small" && parityTrend === "odd") {
+        [1, 3, 5].forEach(num => { s[num] += 0.2; });
+      } else if (sizeTrend === "small" && parityTrend === "even") {
+        [2, 4].forEach(num => { s[num] += 0.2; });
+      }
+      return s;
+    }
+
+    // ── 邏輯6：近10期判斷大小及奇偶極端情況
+    function logic6(h, p) {
+      const l10 = h.slice(-10);
+      const b = l10.filter(n => n >= 6).length;
+      const oddCount = l10.filter(n => n % 2 === 1).length;
+      const s = {};
+      p.forEach(n => {
+        const part1 = ((b > 5 && n <= 5) || (b <= 5 && n >= 6)) ? 0.2 : 0;
+        const part2 = ((oddCount > 5 && n % 2 === 0) || (oddCount <= 5 && n % 2 === 1)) ? 0.2 : 0;
+        s[n] = part1 + part2;
+      });
+      return s;
+    }
+
+    // ── 邏輯7a 與 7b：連續與隔一期出現檢查（保持不變，採用最近15期）
+    function logic7a(h, n) {
+      const l15 = h.slice(-15);
+      let c = 0;
+      for (let i = 0; i < l15.length - 1; i++) {
+        if (l15[i] === n && l15[i + 1] === n) c++;
+      }
+      return c / (1 + l15.filter(x => x === n).length);
+    }
+    function logic7b(h, n) {
+      const l15 = h.slice(-15);
+      let c = 0;
+      for (let i = 0; i < l15.length - 2; i++) {
+        if (l15[i] === n && l15[i + 2] === n) c++;
+      }
+      return c / (1 + l15.filter(x => x === n).length);
+    }
+
+    // ── 邏輯8：近10期數據分組（小：≤3，中：4～7，大：≥8）
+    function logic8(h, n) {
+      const l10 = h.slice(-10);
+      const sCount = l10.filter(x => x <= 3).length;
+      const mCount = l10.filter(x => x >= 4 && x <= 7).length;
+      const bCount = l10.filter(x => x >= 8).length;
+      const max = Math.max(sCount, mCount, bCount);
+      return ((max === sCount && n >= 4) ||
+              (max === mCount && (n <= 3 || n >= 8)) ||
+              (max === bCount && n <= 7)) ? 0.5 : 0;
+    }
+
+    // ── 邏輯9：近10期時間加權出現頻率
+    function logic9(h, p) {
+      const l10 = h.slice(-10);
+      let s = {};
+      p.forEach(n => s[n] = 0);
+      const max = l10.length; 
+      l10.forEach((n, i) => {
+        s[n] += 1 + (max - i) * 0.01;
+      });
+      return s;
+    }
+
+    // ── 邏輯10：分組出現頻率（保持不變，使用最近15期）
+    function logic10(h, p) {
+      const l15 = h.slice(-15);
+      let z = { s1: 0, s2: 0, m: 0, b1: 0, b2: 0 };
+      l15.forEach(n => {
+        if (n <= 2) z.s1++; 
+        else if (n <= 4) z.s2++; 
+        else if (n <= 6) z.m++; 
+        else if (n <= 8) z.b1++; 
+        else z.b2++;
+      });
+      const max = Math.max(...Object.values(z));
+      const s = {};
+      p.forEach(n => {
+        if (n <= 2 && z.s1 < max) s[n] = 0.4;
+        else if (n <= 4 && z.s2 < max) s[n] = 0.4;
+        else if (n <= 6 && z.m < max) s[n] = 0.4;
+        else if (n <= 8 && z.b1 < max) s[n] = 0.4;
+        else if (z.b2 < max) s[n] = 0.4;
+        else s[n] = 0;
+      });
+      return s;
+    }
+
+    // ── 邏輯11：冷號判斷（合併最近15期與整個100期資料）
+    function logic11(h, n) {
+      const recentPeriod = 15;
+      const recentNumbers = h.slice(-recentPeriod);
+      const countRecent = recentNumbers.filter(num => num === n).length;
+      const scoreRecent = (countRecent === 0) ? 0.5 : (-0.1 * countRecent);
+
+      const countTotal = h.filter(num => num === n).length; // h 為100期資料
+      const scoreTotal = (countTotal === 0) ? 0.5 : (-0.1 * countTotal);
+
+      return (scoreRecent + scoreTotal) / 2;
+    }
+
+    // ── 動態權重計算
+    function getDynamicWeights(h, s, p) {
+      const d = {};
+      d.w1 = weight.w1 / avg(Object.values(s[1]));
+      d.w2 = weight.w2 / avg(Object.values(s[2]));
+      d.w3 = weight.w3 / avg(Object.values(s[3]));
+      d.w5 = weight.w5 / avg(Object.values(s[5]));
+      d.w6 = weight.w6 / avg(Object.values(s[6]));
+      d.w7a = weight.w7a / avg(p.map(n => logic7a(h, n)));
+      d.w7b = weight.w7b / avg(p.map(n => logic7b(h, n)));
+      d.w8 = weight.w8 / avg(p.map(n => logic8(h, n)));
+      d.w9 = weight.w9 / avg(Object.values(s[9]));
+      d.w10 = weight.w10 / avg(Object.values(s[10]));
+      d.w11 = weight.w11 / avg(p.map(n => logic11(h, n)));
+      return d;
+    }
+
+    // ── 融合得分計算（原始得分與動態得分平均），用於溫號判斷
+    function getOriginalScore(h, n, p, s) {
+      return weight.w1 * s[1][n] +
+             weight.w2 * s[2][n] +
+             weight.w3 * s[3][n] +
+             weight.w5 * s[5][n] +
+             weight.w6 * s[6][n] +
+             weight.w7a * logic7a(h, n) +
+             weight.w7b * logic7b(h, n) +
+             weight.w8 * logic8(h, n) +
+             weight.w9 * s[9][n] +
+             weight.w10 * s[10][n] +
+             weight.w11 * logic11(h, n);
+    }
+    function getDynamicScore(h, n, p, s, d) {
+      return d.w1 * s[1][n] +
+             d.w2 * s[2][n] +
+             d.w3 * s[3][n] +
+             d.w5 * s[5][n] +
+             d.w6 * s[6][n] +
+             d.w7a * logic7a(h, n) +
+             d.w7b * logic7b(h, n) +
+             d.w8 * logic8(h, n) +
+             d.w9 * s[9][n] +
+             d.w10 * s[10][n] +
+             d.w11 * logic11(h, n);
+    }
+
+    // ── 排序（依分數由大到小）
+    function sortedCandidates(scoreObj) {
+      return fullPool.slice().sort((a, b) => scoreObj[b] - scoreObj[a]);
+    }
+
+    function analyze() {
+      const h = parseInput();
+      if (h.length < 100) {
+        alert("請至少輸入100期號碼！");
+        return;
+      }
+      // 使用最新100期作為歷史資料
+      const r = h.slice(-100);
+
+      // 計算各邏輯分數
+      const s = {
+        1: logic1(r, fullPool),
+        2: logic2(r, fullPool),
+        3: logic3(r, fullPool),
+        5: logic5(r, fullPool),
+        6: logic6(r, fullPool),
+        9: logic9(r, fullPool),
+        10: logic10(r, fullPool)
+      };
+
+      // 動態權重
+      const d = getDynamicWeights(r, s, fullPool);
+
+      // 計算整體融合得分
+      const overallScore = {};
+      fullPool.forEach(n => {
+        const orig = getOriginalScore(r, n, fullPool, s);
+        const dyn = getDynamicScore(r, n, fullPool, s, d);
+        overallScore[n] = (orig + dyn) / 2;
+      });
+
+      // 1) 延續號碼：直接取最後一期
+      const continuityNum = r[r.length - 1];
+
+      // 2) 從整體融合得分中選出最高分 2 顆，若與延續號碼重疊就往後補
+      const overallCandidates = sortedCandidates(overallScore);
+      function pickTopTwoIgnoring(candidates, ignoreNum) {
+        const result = [];
+        for (let c of candidates) {
+          if (c !== ignoreNum) {
+            result.push(c);
+          }
+          if (result.length === 2) break;
+        }
+        return result;
+      }
+      const topOverall = pickTopTwoIgnoring(overallCandidates, continuityNum);
+
+      // 3) 剩餘候選（去除延續號碼與 topOverall）
+      let remaining = fullPool.filter(n => !topOverall.includes(n) && n !== continuityNum);
+
+      // 4) 從剩餘中選出溫號（overallScore 最高）
+      remaining.sort((a, b) => overallScore[b] - overallScore[a]);
+      const warmNum = remaining[0];
+      remaining = remaining.filter(n => n !== warmNum);
+
+      // 5) 冷號：使用 logic11 從剩餘中挑最高
+      const coldScores = {};
+      remaining.forEach(n => { coldScores[n] = logic11(r, n); });
+      remaining.sort((a, b) => coldScores[b] - coldScores[a]);
+      const coldNum = remaining[0];
+
+      // 6) 最終組合：延續號碼 + 最高分 2 顆 + 溫號 + 冷號，共 5 顆
+      const chosen = [continuityNum, ...topOverall, warmNum, coldNum];
+      chosen.sort((a, b) => a - b);
+
+      // 顯示結果
+      let html = `<h2>預測結果</h2>`;
+      html += `<p><strong>延續號碼（最後一期）：</strong> ${continuityNum}</p>`;
+      html += `<p><strong>最高分 2 顆（整體融合得分）：</strong> ${topOverall.join(", ")}</p>`;
+      html += `<p><strong>溫號（剩餘中最高）：</strong> ${warmNum}</p>`;
+      html += `<p><strong>冷號（剩餘中最高）：</strong> ${coldNum}</p>`;
+      html += `<p><strong>最終選號：</strong> ${chosen.join(", ")}</p>`;
+      document.getElementById("result").innerHTML = html;
+    }
+  </script>
+</body>
+</html>
